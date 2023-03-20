@@ -7,11 +7,12 @@ Created:
 14-3-2023 by Duuk Sikkens
 
 Last edited:
-17-3-2023 by Duuk Sikkens
+20-3-2023 by Duuk Sikkens
 """
 
 import requests
 import json
+import time
 
 from typing import List, Dict, Union, Type, Tuple
 TypeJSON = Union[Dict[str, 'TypeJSON'], List['TypeJSON'], int, str, float, bool, Type[None]] # Dit is puur voor typehints
@@ -27,7 +28,7 @@ class Stemming:
 
         self.fractiegrootten = dict()
         self.stemmingen = dict()
-        self.id = str() # het id van de zaak in de tweede kamer API
+        self.id = str() # het id van het besluit in de tweede kamer API
         self.stemmingssoort = str()
         self.datum = tuple((int(), int(), int()))
         self.zaaknummer = str()
@@ -106,10 +107,81 @@ def jsprint(js: TypeJSON, ind: int = 3):
     
     print(json.dumps(js, indent=ind))
 
-def getstemmingen(datum: Tuple[int, int, int]):
+def getstemming(besluit: TypeJSON):
 
     """
-    Geeft alle stemmingen van partijen op een bepaalde dag (year-month-day)
+    Bepaald hoe de fracties/kamerleden hebben gestemd om tot een gegeven besluit te komen,
+    en de zaak waar het besluit toe behoort.
+
+    Returns: Stemming
+    """
+
+    besluitid = besluit['Id']
+    stemming = Stemming()
+    stemming.stemmingssoort = besluit['StemmingsSoort']
+    datumlst = besluit['GewijzigdOp'].split('T')[0].split('-')
+    stemming.datum = int(datumlst[0]), int(datumlst[1]), int(datumlst[2])
+
+    # Bepaal hoe de fracties/leden hebben gestemd
+    stemmingen = requests.get(url = URL + f"/Besluit({besluitid})?$expand= Stemming").json()['Stemming']
+    
+    if stemming.stemmingssoort == 'Met handopsteken':
+        totzetels = 0
+        for s in stemmingen:
+            if not s['Verwijderd']:
+                stemming.stemmingen[s['ActorFractie']] = {'Voor': 1, 'Niet deelgenomen': 0, 'Tegen': -1}[s['Soort']]
+                stemming.fractiegrootten[s['ActorFractie']] = s['FractieGrootte']
+                totzetels += s['FractieGrootte']
+        
+        if totzetels != stemming.totaalzetels():
+            print('FOUT: verkeerd aantal zetels bij het volgende besluit')
+            jsprint(besluit)
+            raise ValueError
+    
+    elif stemming.stemmingssoort == 'Hoofdelijk':
+        totzetels = 0
+        for s in stemmingen:
+            if not s['Verwijderd']:
+                stemming.stemmingen[s['ActorNaam']] = {'Voor': 1, 'Niet deelgenomen': 0, 'Tegen': -1}[s['Soort']]
+                totzetels += 1
+
+        if totzetels != stemming.totaalzetels():
+            print('FOUT: verkeerd aantal zetels bij het volgende besluit')
+            jsprint(besluit)
+            raise ValueError     
+
+    # Bepaal de zaak waar de stemming over gaat
+    zaken = requests.get(url = URL + f"/Besluit({besluitid})?$expand= Zaak").json()['Zaak']
+    if len(zaken) != 1:
+        print('FOUT: meer dan één of 0 zaken bij het volgende besluit')
+        jsprint(besluit)
+        raise ValueError
+    
+    zaak = zaken[0]
+    stemming.zaaknummer = zaak['Nummer']
+    stemming.soort = zaak['Soort']
+    stemming.zaaktitel = zaak['Titel']
+    stemming.zaakciteertitel = zaak['Citeertitel']
+    stemming.onderwerp = zaak['Onderwerp']
+
+    return stemming
+
+def getstemming_id(besluitid: str):
+
+    """
+    Doet hetzelfde als getstemming maar heeft alleen het id nodig
+
+    Returns: Stemming
+    """
+
+    besluit = requests.get(url = URL + f'/Besluit({besluitid})')
+
+    return getstemming(besluit)
+
+def getstemmingen_datum(datum: Tuple[int, int, int]):
+
+    """
+    Geeft alle stemmingen op een bepaalde dag (year-month-day)
     
     Returns: List[Stemming]
     """
@@ -118,74 +190,7 @@ def getstemmingen(datum: Tuple[int, int, int]):
     besluiten = requests.get(url = URL + "/Besluit?$filter= (StemmingsSoort eq 'Met handopsteken' or StemmingsSoort eq 'Hoofdelijk') and "\
                                        + f"(year(GewijzigdOp) eq {y} and month(GewijzigdOp) eq {m} and day(GewijzigdOp) eq {d})").json()['value']
 
-    stemmingenlst = []
-    for besluit in besluiten:
-        if not besluit['Verwijderd']:
-
-            # Bepaal hoe de partijen hebben gestemd
-            besluitid = besluit['Id']
-            stemming = Stemming()
-            stemming.stemmingssoort = besluit['StemmingsSoort']
-            stemming.datum = datum
-
-            stemmingen = requests.get(url = URL + f'/Besluit({besluitid})?$expand= Stemming').json()['Stemming']
-            
-            if stemming.stemmingssoort == 'Met handopsteken':
-                for s in stemmingen:
-                    if not s['Verwijderd']:
-                        stemming.stemmingen[s['ActorFractie']] = {'Voor': 1, 'Niet deelgenomen': 0, 'Tegen': -1}[s['Soort']]
-                        stemming.fractiegrootten[s['ActorFractie']] = s['FractieGrootte']
-            
-            elif stemming.stemmingssoort == 'Hoofdelijk':
-                for s in stemmingen:
-                    if not s['Verwijderd']:
-                        stemming.stemmingen[s['ActorNaam']] = {'Voor': 1, 'Niet deelgenomen': 0, 'Tegen': -1}[s['Soort']]
-
-            # Bepaal de zaak waar de stemming over gaat
-            zaken = requests.get(url = URL + f"/Besluit({besluitid})?$expand= Zaak").json()['Zaak']
-            if len(zaken) != 1:
-                raise ValueError
-                """
-                TODO:
-                Code schrijven die ons erop attendeert dat één stemming fsr over meerdere zaken ging
-                """
-            
-            zaak = zaken[0]
-            stemming.id = zaak['Id']
-            stemming.zaaknummer = zaak['Nummer']
-            stemming.soort = zaak['Soort']
-            stemming.zaaktitel = zaak['Titel']
-            stemming.zaakciteertitel = zaak['Citeertitel']
-            stemming.onderwerp = zaak['Onderwerp']
-
-            stemmingenlst.append(stemming)
-
-    return stemmingenlst
-
-def isbijectief(filter: str = ''):
-    if filter == '':
-        besluiten = requests.get(url = URL + "/Besluit?$filter= StemmingsSoort eq 'Met handopsteken' or StemmingsSoort eq 'Hoofdelijk'").json()['value']
-    else:
-        besluiten = requests.get(url = URL + f"/Besluit?$filter= (StemmingsSoort eq 'Met handopsteken' or StemmingsSoort eq 'Hoofdelijk') and ({filter})").json()['value']
-    
-    for besluit in besluiten:
-        besluitid = besluit['Id']
-        zaken = requests.get(url = URL + f"/Besluit({besluitid})?$expand= Zaak").json()['Zaak']
-        if len(zaken) != 1:
-            jsprint(besluit)
-            jsprint(zaken)
-            return
-
-        zaak = zaken[0]
-        zaakid = zaak['Id']
-        besluitenn = requests.get(url = URL + f"/Zaak({zaakid})?$expand= Besluit($filter = StemmingsSoort eq 'Met handopsteken' or StemmingsSoort eq 'Hoofdelijk')").json()['Besluit']
-        if len(besluitenn) != 1:
-            besluitids = [besluitt['Id'] for besluitt in besluitenn]
-            jsprint(zaak)
-            jsprint(besluitenn)
-            return (besluitids, zaakid)
-
-
+    return [getstemming(besluit) for besluit in besluiten]
 
 
 #========================================================================================================================================
@@ -193,19 +198,12 @@ def isbijectief(filter: str = ''):
 
 def test():
     datum = (2023, 3, 14)
-    stemmingen = getstemmingen(datum)
+    stemmingen = getstemmingen_datum(datum)
     y, m, d = datum
     f = open(f"stemmingen {y}-{m}-{d}.txt", "w")
     for stemming in stemmingen:
         f.write(str(stemming))
     f.close()
 
-def test2():
-    besluitids, zaakid = isbijectief()
-    for besluitid in besluitids:
-        stemmingen = requests.get(url = URL + f'/Besluit({besluitid})?$expand= Stemming').json()['Stemming']
-        jsprint(besluitid)
-        jsprint(stemmingen)
-
 if __name__ == '__main__':
-    test2()
+    test()
